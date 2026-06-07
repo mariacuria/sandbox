@@ -216,35 +216,22 @@ def check_duplicates(rows: list[dict], report: QCReport) -> None:
 # Main pipeline
 # ---------------------------------------------------------------------------
 
-def run_qc(tsv_path: Path, interactive: bool = True) -> QCReport:
+def run_qc(tsv_path: Path) -> QCReport:
     report = QCReport()
-
-    with tsv_path.open(newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f, delimiter="\t")
-        original_headers = list(reader.fieldnames or [])
-
-        # --- 1. Header validation ---
-        header_mapping = validate_headers(original_headers, report, interactive=interactive)
-
-        # Re-map headers in every row
-        raw_rows = []
-        for row in reader:
-            remapped = {header_mapping.get(k, k): v for k, v in row.items()}
-            raw_rows.append(remapped)
-
-    # --- 2. biomarker_id check ---
+  
+    # --- 1. biomarker_id check ---
     rows = check_biomarker_ids(raw_rows, report)
 
-    # --- 3. Required fields ---
+    # --- 2. Required fields ---
     check_required_fields(rows, report)
 
-    # --- 4 & 5. Name/ID consistency ---
+    # --- 3 & 4. Name/ID consistency ---
     check_name_id_consistency(rows, report)
 
-    # --- 6. Evidence-source format ---
+    # --- 5. Evidence-source format ---
     check_evidence_sources(rows, report)
 
-    # --- 7. Duplicates ---
+    # --- 6. Duplicates ---
     check_duplicates(rows, report)
 
     return report
