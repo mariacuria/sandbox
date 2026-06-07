@@ -1,0 +1,376 @@
+"""
+biomarker_qc.py
+---------------
+Standalone QC module for biomarker TSV files.
+
+Checks performed:
+  1. Header validation (with fuzzy-match suggestions for typos)
+  2. biomarker_id presence / sequential assignment
+  3. Required-field completeness per row
+  4. Condition name consistency (TSV name vs. condition_id namespace)
+  5. Assessed-biomarker-entity name consistency (TSV name vs. entity_id namespace)
+  6. Evidence-source format
+  7. Duplicate row detection
+
+Usage:
+    python biomarker_qc.py oncomx.tsv
+    python biomarker_qc.py oncomx.tsv --report qc_report.txt
+    python biomarker_qc.py oncomx.tsv --no-interactive   # skip header correction prompts
+"""
+
+import csv
+import sys
+import argparse
+from difflib import get_close_matches
+from pathlib import Path
+
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+EXPECTED_HEADERS: set[str] = {
+    "biomarker_id",
+    "biomarker",
+    "assessed_biomarker_entity",
+    "assessed_biomarker_entity_id",
+    "assessed_entity_type",
+    "best_biomarker_role",
+    "condition",
+    "condition_id",
+    "exposure_agent",
+    "exposure_agent_id",
+    "specimen",
+    "specimen_id",
+    "loinc_code",
+    "evidence_source",
+    "evidence",
+    "tag",
+}
+
+# Fields that must be non-empty on every row
+REQUIRED_FIELDS: list[str] = [
+    "biomarker_id",
+    "biomarker",
+    "assessed_biomarker_entity",
+    "assessed_biomarker_entity_id",
+    "assessed_entity_type",
+    "best_biomarker_role",
+    "evidence_source",
+    "evidence",
+]
+
+# Each evidence_source should look like  DATABASE:ACCESSION  (e.g. PubMed:12345678)
+EVIDENCE_SOURCE_DELIMITER = ":"
+
+
+# ---------------------------------------------------------------------------
+# Issue collector
+# ---------------------------------------------------------------------------
+
+class QCReport:
+    def __init__(self) -> None:
+        self.issues: list[dict] = []
+
+    def add(self, level: str, row: int | None, field: str | None, message: str) -> None:
+        self.issues.append({
+            "level": level,        # "ERROR" | "WARNING" | "INFO"
+            "row": row,
+            "field": field,
+            "message": message,
+        })
+
+    def error(self, message: str, row: int | None = None, field: str | None = None) -> None:
+        self.add("ERROR", row, field, message)
+
+    def warning(self, message: str, row: int | None = None, field: str | None = None) -> None:
+        self.add("WARNING", row, field, message)
+
+    def info(self, message: str, row: int | None = None, field: str | None = None) -> None:
+        self.add("INFO", row, field, message)
+
+    def print_summary(self, file=sys.stdout) -> None:
+        errors   = [i for i in self.issues if i["level"] == "ERROR"]
+        warnings = [i for i in self.issues if i["level"] == "WARNING"]
+        infos    = [i for i in self.issues if i["level"] == "INFO"]
+
+        print(f"\n{'='*60}", file=file)
+        print(f"QC SUMMARY  —  {len(errors)} errors, {len(warnings)} warnings, {len(infos)} info", file=file)
+        print(f"{'='*60}", file=file)
+
+        for issue in self.issues:
+            loc = f"row {issue['row']}" if issue["row"] is not None else "file"
+            fld = f" [{issue['field']}]" if issue["field"] else ""
+            print(f"[{issue['level']}] ({loc}){fld}: {issue['message']}", file=file)
+
+        print(f"{'='*60}\n", file=file)
+
+    def write(self, path: Path) -> None:
+        with path.open("w") as f:
+            self.print_summary(file=f)
+
+
+# ---------------------------------------------------------------------------
+# 1. Header validation
+# ---------------------------------------------------------------------------
+
+def validate_headers(
+    headers: list[str],
+    report: QCReport,
+    interactive: bool = True,
+) -> dict[str, str]:
+    """Return a mapping {original_header: corrected_header}.
+
+    Unexpected headers are fuzzy-matched against EXPECTED_HEADERS;
+    the user is asked (when interactive=True) whether to accept each suggestion.
+    """
+    mapping: dict[str, str] = {}
+    header_set = set(headers)
+
+    missing  = EXPECTED_HEADERS - header_set
+    extra    = header_set - EXPECTED_HEADERS
+
+    if missing:
+        report.warning(f"Missing expected headers: {sorted(missing)}")
+
+    for h in headers:
+        corrected = h
+        if h in extra:
+            suggestions = get_close_matches(
+                h.lower(),
+                [e.lower() for e in EXPECTED_HEADERS],
+                n=1,
+                cutoff=0.6,
+            )
+            if suggestions:
+                # Map suggestion string back to original casing
+                best = next(e for e in EXPECTED_HEADERS if e.lower() == suggestions[0])
+                if interactive:
+                    response = _ask_yes_no(
+                        f"WARNING — Did you mean '{best}' instead of '{h}'?"
+                    )
+                    if response:
+                        corrected = best
+                        report.info(f"Header '{h}' corrected to '{best}'")
+                    else:
+                        report.warning(f"Unexpected header kept as-is: '{h}'")
+                else:
+                    # Non-interactive: auto-accept suggestions
+                    corrected = best
+                    report.info(f"Header '{h}' auto-corrected to '{best}'")
+            else:
+                report.warning(f"Unrecognised header with no close match: '{h}'")
+        mapping[h] = corrected
+
+    return mapping
+
+
+def _ask_yes_no(prompt: str) -> bool:
+    while True:
+        ans = input(f"{prompt} (y/n): ").strip().lower()
+        if ans in ("y", "yes"):
+            return True
+        if ans in ("n", "no"):
+            return False
+        print("Please enter 'y' or 'n'.")
+
+
+# ---------------------------------------------------------------------------
+# 2. biomarker_id check + sequential assignment
+# ---------------------------------------------------------------------------
+
+def check_biomarker_ids(
+    rows: list[dict],
+    report: QCReport,
+) -> list[dict]:
+    """Warn if all biomarker_id values are empty and assign sequential IDs."""
+    if not rows:
+        return rows
+
+    all_empty = all(not r.get("biomarker_id", "").strip() for r in rows)
+    if all_empty:
+        report.warning(
+            f"biomarker_id is empty for all {len(rows)} rows. "
+            "Assigning sequential IDs 1 … N for QC purposes."
+        )
+        for i, row in enumerate(rows, start=1):
+            row["biomarker_id"] = str(i)
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# 3. Required-field completeness
+# ---------------------------------------------------------------------------
+
+def check_required_fields(rows: list[dict], report: QCReport) -> None:
+    """Flag rows where a required field is missing or blank."""
+    for row_num, row in enumerate(rows, start=2):  # row 1 = header
+        for field in REQUIRED_FIELDS:
+            if not row.get(field, "").strip():
+                report.error(
+                    f"Required field '{field}' is empty.",
+                    row=row_num,
+                    field=field,
+                )
+
+
+# ---------------------------------------------------------------------------
+# 4 & 5. Name-vs-ID consistency checks
+#         (condition name, assessed biomarker entity name)
+# ---------------------------------------------------------------------------
+
+def check_name_id_consistency(rows: list[dict], report: QCReport) -> None:
+    """Detect rows where the same ID is paired with different display names.
+
+    This is the lightweight, offline version of the API-backed matching in
+    tsv_to_json.py. It groups rows by ID and flags whenever the associated
+    name varies across rows — which almost always means a typo or stale name.
+
+    Fields checked
+    --------------
+    condition_id      → condition
+    assessed_biomarker_entity_id  → assessed_biomarker_entity
+    exposure_agent_id → exposure_agent
+    specimen_id       → specimen
+    """
+    checks = [
+        ("condition_id",                  "condition"),
+        ("assessed_biomarker_entity_id",  "assessed_biomarker_entity"),
+        ("exposure_agent_id",             "exposure_agent"),
+        ("specimen_id",                   "specimen"),
+    ]
+
+    for id_field, name_field in checks:
+        id_to_names: dict[str, set[str]] = {}
+        id_to_rows: dict[str, list[int]]  = {}
+
+        for row_num, row in enumerate(rows, start=2):
+            id_val   = row.get(id_field, "").strip()
+            name_val = row.get(name_field, "").strip()
+            if not id_val:
+                continue
+            id_to_names.setdefault(id_val, set()).add(name_val)
+            id_to_rows.setdefault(id_val, []).append(row_num)
+
+        for id_val, names in id_to_names.items():
+            if len(names) > 1:
+                report.warning(
+                    f"ID '{id_val}' ({id_field}) is paired with multiple "
+                    f"names in '{name_field}': {sorted(names)}  "
+                    f"(rows: {id_to_rows[id_val]})",
+                    field=name_field,
+                )
+
+
+# ---------------------------------------------------------------------------
+# 6. Evidence-source format
+# ---------------------------------------------------------------------------
+
+def check_evidence_sources(rows: list[dict], report: QCReport) -> None:
+    """Verify evidence_source entries follow DATABASE:ACCESSION format."""
+    for row_num, row in enumerate(rows, start=2):
+        src = row.get("evidence_source", "").strip()
+        if not src:
+            continue  # already caught by required-field check
+        parts = src.split(EVIDENCE_SOURCE_DELIMITER)
+        if len(parts) < 2 or not parts[0].strip() or not parts[-1].strip():
+            report.error(
+                f"evidence_source '{src}' does not match expected "
+                f"'DATABASE{EVIDENCE_SOURCE_DELIMITER}ACCESSION' format.",
+                row=row_num,
+                field="evidence_source",
+            )
+
+
+# ---------------------------------------------------------------------------
+# 7. Duplicate row detection
+# ---------------------------------------------------------------------------
+
+def check_duplicates(rows: list[dict], report: QCReport) -> None:
+    """Flag exact duplicate rows (ignoring whitespace)."""
+    # Use a frozenset of items as a hashable row key
+    seen: dict[tuple, int] = {}
+    for row_num, row in enumerate(rows, start=2):
+        key = tuple(sorted((k, v.strip()) for k, v in row.items()))
+        if key in seen:
+            report.warning(
+                f"Row {row_num} is an exact duplicate of row {seen[key]}.",
+                row=row_num,
+            )
+        else:
+            seen[key] = row_num
+
+
+# ---------------------------------------------------------------------------
+# Main pipeline
+# ---------------------------------------------------------------------------
+
+def run_qc(tsv_path: Path, interactive: bool = True) -> QCReport:
+    report = QCReport()
+
+    with tsv_path.open(newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        original_headers = list(reader.fieldnames or [])
+
+        # --- 1. Header validation ---
+        header_mapping = validate_headers(original_headers, report, interactive=interactive)
+
+        # Re-map headers in every row
+        raw_rows = []
+        for row in reader:
+            remapped = {header_mapping.get(k, k): v for k, v in row.items()}
+            raw_rows.append(remapped)
+
+    # --- 2. biomarker_id check ---
+    rows = check_biomarker_ids(raw_rows, report)
+
+    # --- 3. Required fields ---
+    check_required_fields(rows, report)
+
+    # --- 4 & 5. Name/ID consistency ---
+    check_name_id_consistency(rows, report)
+
+    # --- 6. Evidence-source format ---
+    check_evidence_sources(rows, report)
+
+    # --- 7. Duplicates ---
+    check_duplicates(rows, report)
+
+    return report
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="QC checker for biomarker TSV files."
+    )
+    parser.add_argument("tsv", type=Path, help="Path to the input TSV file.")
+    parser.add_argument(
+        "--report", type=Path, default=None,
+        help="Optional path to write the QC report (plain text).",
+    )
+    parser.add_argument(
+        "--no-interactive", dest="interactive", action="store_false",
+        help="Skip interactive header-correction prompts (auto-accept suggestions).",
+    )
+    args = parser.parse_args()
+
+    if not args.tsv.exists():
+        sys.exit(f"File not found: {args.tsv}")
+
+    report = run_qc(args.tsv, interactive=args.interactive)
+    report.print_summary()
+
+    if args.report:
+        report.write(args.report)
+        print(f"Report written to {args.report}")
+
+    errors = sum(1 for i in report.issues if i["level"] == "ERROR")
+    sys.exit(1 if errors else 0)
+
+
+if __name__ == "__main__":
+    main()
