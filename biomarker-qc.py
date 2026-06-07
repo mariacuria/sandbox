@@ -268,7 +268,7 @@ def main() -> None:
     if not args.tsv.exists():
         sys.exit(f"File not found: {args.tsv}")
 
-    report = run_qc(args.tsv, interactive=args.interactive)
+    report = run_qc(args.tsv)
     report.print_summary()
 
     if args.report:
