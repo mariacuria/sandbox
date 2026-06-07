@@ -1,6 +1,4 @@
 """
-biomarker_qc.py
----------------
 Standalone QC module for biomarker TSV files.
 
 Checks performed:
