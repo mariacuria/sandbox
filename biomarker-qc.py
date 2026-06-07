@@ -1,13 +1,14 @@
 """
+biomarker-qc.py
+---------------
 Standalone QC module for biomarker TSV files.
 
 Checks performed:
-  1. biomarker_id presence / sequential assignment
-  2. Required-field completeness per row
-  3. Condition name consistency (TSV name vs. condition_id namespace)
-  4. Assessed-biomarker-entity name consistency (TSV name vs. entity_id namespace)
-  5. Evidence-source format
-  6. Duplicate row detection
+  1. Required-field completeness per row
+  2. Condition name consistency (TSV name vs. condition_id namespace)
+  3. Assessed-biomarker-entity name consistency (TSV name vs. entity_id namespace)
+  4. Evidence-source format
+  5. Duplicate row detection
 
 Usage:
     python biomarker-qc.py oncomx.tsv
@@ -17,7 +18,6 @@ Usage:
 import csv
 import sys
 import argparse
-from difflib import get_close_matches
 from pathlib import Path
 
 
@@ -86,31 +86,9 @@ class QCReport:
         with path.open("w") as f:
             self.print_summary(file=f)
 
-# ---------------------------------------------------------------------------
-# 1. biomarker_id check + sequential assignment
-# ---------------------------------------------------------------------------
-
-def check_biomarker_ids(
-    rows: list[dict],
-    report: QCReport,
-) -> list[dict]:
-    """Warn if all biomarker_id values are empty and assign sequential IDs."""
-    if not rows:
-        return rows
-
-    all_empty = all(not r.get("biomarker_id", "").strip() for r in rows)
-    if all_empty:
-        report.warning(
-            f"biomarker_id is empty for all {len(rows)} rows. "
-            "Assigning sequential IDs 1 … N for QC purposes."
-        )
-        for i, row in enumerate(rows, start=1):
-            row["biomarker_id"] = str(i)
-    return rows
-
 
 # ---------------------------------------------------------------------------
-# 2. Required-field completeness
+# 1. Required-field completeness
 # ---------------------------------------------------------------------------
 
 def check_required_fields(rows: list[dict], report: QCReport) -> None:
@@ -126,23 +104,22 @@ def check_required_fields(rows: list[dict], report: QCReport) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 3 & 4. Name-vs-ID consistency checks
+# 2 & 3. Name-vs-ID consistency checks
 #         (condition name, assessed biomarker entity name)
 # ---------------------------------------------------------------------------
 
 def check_name_id_consistency(rows: list[dict], report: QCReport) -> None:
     """Detect rows where the same ID is paired with different display names.
 
-    This is the lightweight, offline version of the API-backed matching in
-    tsv_to_json.py. It groups rows by ID and flags whenever the associated
-    name varies across rows — which almost always means a typo or stale name.
+    Groups rows by ID and flags whenever the associated name varies — which
+    almost always means a typo or stale name.
 
     Fields checked
     --------------
-    condition_id      → condition
-    assessed_biomarker_entity_id  → assessed_biomarker_entity
-    exposure_agent_id → exposure_agent
-    specimen_id       → specimen
+    condition_id                 → condition
+    assessed_biomarker_entity_id → assessed_biomarker_entity
+    exposure_agent_id            → exposure_agent
+    specimen_id                  → specimen
     """
     checks = [
         ("condition_id",                  "condition"),
@@ -153,7 +130,7 @@ def check_name_id_consistency(rows: list[dict], report: QCReport) -> None:
 
     for id_field, name_field in checks:
         id_to_names: dict[str, set[str]] = {}
-        id_to_rows: dict[str, list[int]]  = {}
+        id_to_rows: dict[str, list[int]] = {}
 
         for row_num, row in enumerate(rows, start=2):
             id_val   = row.get(id_field, "").strip()
@@ -174,7 +151,7 @@ def check_name_id_consistency(rows: list[dict], report: QCReport) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 5. Evidence-source format
+# 4. Evidence-source format
 # ---------------------------------------------------------------------------
 
 def check_evidence_sources(rows: list[dict], report: QCReport) -> None:
@@ -194,12 +171,11 @@ def check_evidence_sources(rows: list[dict], report: QCReport) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 6. Duplicate row detection
+# 5. Duplicate row detection
 # ---------------------------------------------------------------------------
 
 def check_duplicates(rows: list[dict], report: QCReport) -> None:
-    """Flag exact duplicate rows (ignoring whitespace)."""
-    # Use a frozenset of items as a hashable row key
+    """Flag exact duplicate rows (ignoring leading/trailing whitespace)."""
     seen: dict[tuple, int] = {}
     for row_num, row in enumerate(rows, start=2):
         key = tuple(sorted((k, v.strip()) for k, v in row.items()))
@@ -218,20 +194,14 @@ def check_duplicates(rows: list[dict], report: QCReport) -> None:
 
 def run_qc(tsv_path: Path) -> QCReport:
     report = QCReport()
-  
-    # --- 1. biomarker_id check ---
-    rows = check_biomarker_ids(raw_rows, report)
 
-    # --- 2. Required fields ---
+    with tsv_path.open(newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        rows = list(reader)
+
     check_required_fields(rows, report)
-
-    # --- 3 & 4. Name/ID consistency ---
     check_name_id_consistency(rows, report)
-
-    # --- 5. Evidence-source format ---
     check_evidence_sources(rows, report)
-
-    # --- 6. Duplicates ---
     check_duplicates(rows, report)
 
     return report
