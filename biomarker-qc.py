@@ -2,18 +2,16 @@
 Standalone QC module for biomarker TSV files.
 
 Checks performed:
-  1. Header validation (with fuzzy-match suggestions for typos)
-  2. biomarker_id presence / sequential assignment
-  3. Required-field completeness per row
-  4. Condition name consistency (TSV name vs. condition_id namespace)
-  5. Assessed-biomarker-entity name consistency (TSV name vs. entity_id namespace)
-  6. Evidence-source format
-  7. Duplicate row detection
+  1. biomarker_id presence / sequential assignment
+  2. Required-field completeness per row
+  3. Condition name consistency (TSV name vs. condition_id namespace)
+  4. Assessed-biomarker-entity name consistency (TSV name vs. entity_id namespace)
+  5. Evidence-source format
+  6. Duplicate row detection
 
 Usage:
     python biomarker-qc.py oncomx.tsv
     python biomarker-qc.py oncomx.tsv --report qc_report.txt
-    python biomarker-qc.py oncomx.tsv --no-interactive   # skip header correction prompts
 """
 
 import csv
@@ -26,25 +24,6 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-
-EXPECTED_HEADERS: set[str] = {
-    "biomarker_id",
-    "biomarker",
-    "assessed_biomarker_entity",
-    "assessed_biomarker_entity_id",
-    "assessed_entity_type",
-    "best_biomarker_role",
-    "condition",
-    "condition_id",
-    "exposure_agent",
-    "exposure_agent_id",
-    "specimen",
-    "specimen_id",
-    "loinc_code",
-    "evidence_source",
-    "evidence",
-    "tag",
-}
 
 # Fields that must be non-empty on every row
 REQUIRED_FIELDS: list[str] = [
@@ -107,74 +86,8 @@ class QCReport:
         with path.open("w") as f:
             self.print_summary(file=f)
 
-
 # ---------------------------------------------------------------------------
-# 1. Header validation
-# ---------------------------------------------------------------------------
-
-def validate_headers(
-    headers: list[str],
-    report: QCReport,
-    interactive: bool = True,
-) -> dict[str, str]:
-    """Return a mapping {original_header: corrected_header}.
-
-    Unexpected headers are fuzzy-matched against EXPECTED_HEADERS;
-    the user is asked (when interactive=True) whether to accept each suggestion.
-    """
-    mapping: dict[str, str] = {}
-    header_set = set(headers)
-
-    missing  = EXPECTED_HEADERS - header_set
-    extra    = header_set - EXPECTED_HEADERS
-
-    if missing:
-        report.warning(f"Missing expected headers: {sorted(missing)}")
-
-    for h in headers:
-        corrected = h
-        if h in extra:
-            suggestions = get_close_matches(
-                h.lower(),
-                [e.lower() for e in EXPECTED_HEADERS],
-                n=1,
-                cutoff=0.6,
-            )
-            if suggestions:
-                # Map suggestion string back to original casing
-                best = next(e for e in EXPECTED_HEADERS if e.lower() == suggestions[0])
-                if interactive:
-                    response = _ask_yes_no(
-                        f"WARNING — Did you mean '{best}' instead of '{h}'?"
-                    )
-                    if response:
-                        corrected = best
-                        report.info(f"Header '{h}' corrected to '{best}'")
-                    else:
-                        report.warning(f"Unexpected header kept as-is: '{h}'")
-                else:
-                    # Non-interactive: auto-accept suggestions
-                    corrected = best
-                    report.info(f"Header '{h}' auto-corrected to '{best}'")
-            else:
-                report.warning(f"Unrecognised header with no close match: '{h}'")
-        mapping[h] = corrected
-
-    return mapping
-
-
-def _ask_yes_no(prompt: str) -> bool:
-    while True:
-        ans = input(f"{prompt} (y/n): ").strip().lower()
-        if ans in ("y", "yes"):
-            return True
-        if ans in ("n", "no"):
-            return False
-        print("Please enter 'y' or 'n'.")
-
-
-# ---------------------------------------------------------------------------
-# 2. biomarker_id check + sequential assignment
+# 1. biomarker_id check + sequential assignment
 # ---------------------------------------------------------------------------
 
 def check_biomarker_ids(
@@ -197,7 +110,7 @@ def check_biomarker_ids(
 
 
 # ---------------------------------------------------------------------------
-# 3. Required-field completeness
+# 2. Required-field completeness
 # ---------------------------------------------------------------------------
 
 def check_required_fields(rows: list[dict], report: QCReport) -> None:
@@ -213,7 +126,7 @@ def check_required_fields(rows: list[dict], report: QCReport) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 4 & 5. Name-vs-ID consistency checks
+# 3 & 4. Name-vs-ID consistency checks
 #         (condition name, assessed biomarker entity name)
 # ---------------------------------------------------------------------------
 
@@ -261,7 +174,7 @@ def check_name_id_consistency(rows: list[dict], report: QCReport) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 6. Evidence-source format
+# 5. Evidence-source format
 # ---------------------------------------------------------------------------
 
 def check_evidence_sources(rows: list[dict], report: QCReport) -> None:
@@ -281,7 +194,7 @@ def check_evidence_sources(rows: list[dict], report: QCReport) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 7. Duplicate row detection
+# 6. Duplicate row detection
 # ---------------------------------------------------------------------------
 
 def check_duplicates(rows: list[dict], report: QCReport) -> None:
@@ -349,10 +262,6 @@ def main() -> None:
     parser.add_argument(
         "--report", type=Path, default=None,
         help="Optional path to write the QC report (plain text).",
-    )
-    parser.add_argument(
-        "--no-interactive", dest="interactive", action="store_false",
-        help="Skip interactive header-correction prompts (auto-accept suggestions).",
     )
     args = parser.parse_args()
 
