@@ -11,9 +11,9 @@ Checks performed:
   7. Duplicate row detection
 
 Usage:
-    python biomarker_qc.py oncomx.tsv
-    python biomarker_qc.py oncomx.tsv --report qc_report.txt
-    python biomarker_qc.py oncomx.tsv --no-interactive   # skip header correction prompts
+    python biomarker-qc.py oncomx.tsv
+    python biomarker-qc.py oncomx.tsv --report qc_report.txt
+    python biomarker-qc.py oncomx.tsv --no-interactive   # skip header correction prompts
 """
 
 import csv
